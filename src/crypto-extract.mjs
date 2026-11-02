@@ -109,11 +109,20 @@ function withoutTrailingComment(l) {
   }
   return l;
 }
+// A label map line whose key and value are the same word (`'arc4': 'ARC4',` in an i18n table — independent set v1) :
+// a display string for an option, not a cipher in use.
+const LABEL_PAIR_SAME = /^\s*(['"])([\w-]+)\1\s*:\s*(['"])([\w-]+)\3\s*,?\s*$/;
+const labelPairSame = (l) => { const m = LABEL_PAIR_SAME.exec(l); return !!m && m[2].toLowerCase() === m[4].toLowerCase(); };
 function isNotACipherName(lines, i, file) {
   if (file && VERSION_FILE.test(String(file))) return true;
   if (VERSION_ASSIGN.test(lines[i])) return true;
   if (IMPORT_PATH_KEY.test(lines[i])) return true;
-  const code = withoutTrailingComment(lines[i]);
+  // An object KEY (`"rc4": { "exports": "CryptoJS.RC4" … }` — crypto-js build config) and a METADATA value
+  // (`name: "rc4", description: "Implementation of RC4 …"` — jsPDF module table) name a module, they select no cipher
+  // (independent set v1, 2026-11-01). A crypto SETTING (`cipher: "rc4"`, `algorithm: 'rc4'`) keeps firing.
+  const code = withoutTrailingComment(lines[i])
+    .replace(/(^\s*|[{,]\s*)(['"])(?:rc4|rc2|arcfour)\2\s*:/gi, "$1")   // a key follows `{` `,` or the line start — never `?` (a ternary)
+    .replace(/\b(?:name|title|label|description|text|displayName|id|folder|module|exports|key)\s*:\s*(['"])(?:rc4|rc2|arcfour)\1/gi, "");
   if (!RC_LITERAL.test(code)) return true;
   if (isNameList(code)) return true;
   for (let j = Math.max(0, i - 3); j <= Math.min(lines.length - 1, i + 3); j++) {
@@ -127,21 +136,51 @@ function isNotACipherName(lines, i, file) {
 // class that implements it). A call passes a key or bytes, never only literals ending the line with `,` or `;`.
 const ENUM_CONSTANT = /^\s*(?:DESede|TripleDES|3DES|DES)\s*\(\s*(?:(?:"[^"\n]*"|'[^'\n]*'|-?\d+)\s*(?:,\s*(?:"[^"\n]*"|'[^'\n]*'|-?\d+)\s*)*)?\)\s*[,;]\s*$/;
 
+// A line that STARTS inside a multi-line string literal is text : a help page or a hash-format table held in a Go raw
+// string (sliver `1500 | descrypt, DES (Unix), Traditional DES |`), a Python docstring, a Java / Kotlin text block.
+// Independent set v3, 2026-11-01 : 2 blocking FP rows. Delimiters per language ; single-line strings and line comments
+// are skipped so a quote or delimiter inside them never opens a literal. A JS template literal stays code (its
+// `${…}` holes run calls).
+function heisenTextLines(raw, file) {
+  const f = String(file ?? "");
+  const delims = /\.go$/i.test(f) ? ["`"] : /\.py$/i.test(f) ? ['"""', "'''"] : /\.(?:java|kt|kts|scala|cs)$/i.test(f) ? ['"""'] : [];
+  const out = new Array(raw.length).fill(false);
+  if (!delims.length) return out;
+  const lineComment = /\.py$/i.test(f) ? "#" : "//";
+  let open = null;   // the delimiter of the multi-line literal we are inside, or null
+  for (let i = 0; i < raw.length; i++) {
+    out[i] = open !== null;
+    const l = raw[i];
+    for (let k = 0; k < l.length; k++) {
+      if (open) { if (l.startsWith(open, k)) { k += open.length - 1; open = null; } else if (l[k] === "\\" && open !== "`") k++; continue; }
+      const d = delims.find((x) => l.startsWith(x, k));
+      if (d) { open = d; k += d.length - 1; continue; }
+      if (l.startsWith(lineComment, k)) break;
+      if (l[k] === '"' || l[k] === "'") { const q = l[k]; for (k++; k < l.length && l[k] !== q; k++) if (l[k] === "\\") k++; }
+    }
+  }
+  return out;
+}
+
 /** Scan one file → [{line, kind, high, secCtx}]. Source line NEVER leaves this function. */
 export function extractCrypto(text, file) {
   const out = [];
   if (isDecompiledSource(text, file)) return out;   // decompiler output is not the author's code (lang-scope.mjs)
-  const lines = logicalLines(String(text).split(/\r?\n/));   // statements broken across lines read whole (lang-scope.mjs)
+  const raw = String(text).split(/\r?\n/);
+  const lines = logicalLines(raw);   // statements broken across lines read whole (lang-scope.mjs)
+  const inText = heisenTextLines(raw, file);
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
     if (l.length > 4000) continue;   // minified/one-line blob — noise
     if (isComment(l)) continue;      // a weak-algo name in a comment is documentation, not live code
+    if (inText[i]) continue;         // a line inside a multi-line string literal is text, not a call
     if (isImport(l)) continue;       // an import/using line names a crypto type, it does not use it
     const code = maskLiterals(l);    // prose / compared string literals blanked (HIGH tier only)
     for (const [kind, re] of HIGH) {
       if (!re.test(code)) continue;
       const strong = RC_STRONG[kind];
       if (strong && !strong.test(code) && isNotACipherName(lines, i, file)) continue;   // P8: release tag, package name, name list or comment, not a cipher
+      if (strong && LABEL_PAIR_SAME.test(l) && labelPairSame(l)) continue;              // a UI label map `'arc4': 'ARC4',` (AriaNg i18n)
       if (kind === "des-cipher" && ENUM_CONSTANT.test(l)) continue;                     // an enum value declaration, not a DES call
       out.push({ line: i + 1, kind, high: true, secCtx: true });
     }

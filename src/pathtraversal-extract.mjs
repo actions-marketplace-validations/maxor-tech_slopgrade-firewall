@@ -54,10 +54,14 @@ const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 // argument is content, not a path (`fs.writeFile('views/qr/code.txt', QRcode, cb)` — benchmark re-checked 2026-10-31).
 // A template literal can interpolate, so only '…' / "…" count as constant.
 const CONST_FIRST = `(?!\\s*['"][^'"\\n]*['"]\\s*[,)])`;
+// `Image.open(BytesIO(data))` / `pdfplumber.open(io.BytesIO(contents))` / `Image.open(upload.file)` decode an IN-MEMORY
+// stream of uploaded bytes : the bytes are never read as a filesystem path (independent set v1, 2026-11-01 : 3 blocking
+// FPs — LaTeX-OCR, HealthRecordAgent). A path argument to the same `.open` still fires.
+const STREAM_FIRST = `(?!\\s*(?:io\\s*\\.\\s*)?(?:BytesIO|StringIO)\\s*\\(|\\s*\\w+\\s*\\.\\s*(?:file|stream|raw)\\s*\\))`;
 const sink = (v) => {
   const V = esc(v);
   return new RegExp(
-    `\\b(?:open|send_file)\\s*\\(${CONST_FIRST}[^)]*\\b${V}\\b` +
+    `\\b(?:open|send_file)\\s*\\(${CONST_FIRST}${STREAM_FIRST}[^)]*\\b${V}\\b` +
     `|\\bio\\.open\\s*\\(${CONST_FIRST}[^)]*\\b${V}\\b` +
     `|\\bos\\.(?:remove|unlink|rename)\\s*\\(${CONST_FIRST}[^)]*\\b${V}\\b` +
     `|\\bfs\\s*\\.\\s*(?:readFile|readFileSync|createReadStream|open|openSync|writeFile|writeFileSync|unlink|createWriteStream|readdir|readdirSync)\\s*\\(${CONST_FIRST}[^)]*\\b${V}\\b` +
@@ -76,6 +80,37 @@ const HAS_SINK = /\b(?:open|send_file|sendFile|readfile|file_get_contents|fopen|
 const ptSinkTest = (l, v) => !PATH_SANITIZE.test(l) && sink(v).test(l);
 /** The path-traversal wrapper config — shared by the walker's cross-file registry build and the calibration harness. */
 export const pathTraversalWrapperCfg = { sinkTest: ptSinkTest, sanitizer: PATH_SANITIZE, sourceTest: SOURCE, hasSink: HAS_SINK };
+
+// The RHS is ONE call (optionally awaited, optionally followed by member / index access) whose callee does not build a
+// path or a string : `await getItem(id)`, `db.get(Model, pk).file_path`, `pool.lookup(model_id)["path"]`.
+const PATH_BUILDER = /(?:^|\.)(?:join|resolve|normalize|normpath|abspath|realpath|relpath|expanduser|Path|PurePath|PosixPath|str|String|format|concat|replace|strip|lstrip|rstrip|lower|upper|trim|slice|substring|decodeURIComponent|unquote|url2pathname|fspath|toString)$/;
+const MEMBER_TAIL = /^\s*(?:(?:\?\.|\.)\s*[A-Za-z_$][\w$]*|\[[^\]]*\]|\s)*;?\s*$/;
+// A helper DEFINED IN THIS FILE usually builds the path itself (`_get_file_path(file_id)` base64-decodes and joins,
+// `get_workflow_path(id)`, `_get_data_template_path(name)`) : the taint stays (blind labels of the 82 hits the rule
+// first removed : the 9 true ones all called a same-file helper ; the false ones called records / lookups defined elsewhere).
+const definedHere = (name, text) => new RegExp(`(?:\\bdef\\s+|\\bfunction\\s*\\*?\\s*|\\b(?:const|let|var)\\s+)${name.replace(/[$]/g, "\\$")}\\b|^\\s*(?:async\\s+)?${name.replace(/[$]/g, "\\$")}\\s*\\([^)]*\\)\\s*\\{`, "m").test(text);
+function heisenLoadedThroughCall(rhs, text = "", taintedNames = []) {
+  // `(await db.findById(id)).path` : a parenthesized loaded call, then member access only
+  if (/^\s*\(/.test(rhs)) {
+    let depth = 0, k = rhs.indexOf("(");
+    for (; k < rhs.length; k++) { if (rhs[k] === "(") depth++; else if (rhs[k] === ")" && --depth === 0) break; }
+    return k < rhs.length && MEMBER_TAIL.test(rhs.slice(k + 1)) && heisenLoadedThroughCall(rhs.slice(rhs.indexOf("(") + 1, k), text, taintedNames);
+  }
+  const m =/^\s*(?:await\s+)?([A-Za-z_$][\w$.]*)\s*\(/.exec(rhs);
+  if (!m || PATH_BUILDER.test(m[1])) return false;
+  // a bare / self. / this. / cls. call to a function defined in this file : it may build the path → keep the taint
+  const local = /^(?:(?:self|this|cls)\.)?([A-Za-z_$][\w$]*)$/.exec(m[1]);
+  if (local && definedHere(local[1], text)) return false;
+  // a helper whose NAME says it returns a path (`_get_data_template_path(name)`, `registry.get_workflow_path(id)`) builds it
+  if (/(?:path|file|dir|folder|location)\w*$/i.test(m[1].split(".").pop())) return false;
+  // a method ON the user value reads a field of it (`req_data.get("data_path")`, `body.pop("f")`) : not a lookup
+  const recv = m[1].includes(".") ? m[1].slice(0, m[1].lastIndexOf(".")) : "";
+  if (recv && taintedNames.some((v) => recv === v || recv.startsWith(v + ".") || recv.startsWith(v + "["))) return false;
+  // the whole RHS is that call (+ member / index access) — no `+` / template / f-string building around it
+  let depth = 0, k = rhs.indexOf("(", m.index);
+  for (; k < rhs.length; k++) { if (rhs[k] === "(") depth++; else if (rhs[k] === ")" && --depth === 0) break; }
+  return MEMBER_TAIL.test(rhs.slice(k + 1));
+}
 
 /** Path-traversal taint pass — intra-function + inter-procedural + cross-file (a file-sink wrapper imported from another module). */
 function taintPass(lines, text, importedWrappers) {
@@ -103,17 +138,28 @@ function taintPass(lines, text, importedWrappers) {
       const hasTaintVar = [...taint.keys()].some((v) => v !== name && mentions(v, rhs));
       // A hash / uuid of the user value is a fixed-alphabet hex token, never traversable (real-code corpus FP:
       // `name = hashlib.sha256(await request.body()).hexdigest()` → a cache path `f'{name}.json'`).
+      // A value LOADED through a call with the user value as an argument (`item = await getItem(id)`,
+      // `pool.get(model_id).path`) is a record, not a user-chosen path ; only a call that BUILDS a path or string from it
+      // carries the taint (independent sets v4 + v5, 2026-11-02 : frigate, chatchat, omlx x2, stf ; the main false class of
+      // the 5,300-repo tree sweep too). An inline request source on the RHS still taints.
+      if (!hasSource && hasTaintVar && heisenLoadedThroughCall(rhs, text, [...taint.keys()])) { taint.delete(name); return; }
       if ((hasSource || hasTaintVar) && !HASHED.test(rhs)) taint.set(name, "t");
       else taint.delete(name);
     },
   });
 }
 
+// The path an upload middleware STORED the file at (multer `req.file.path`, `req.files[0].path`, `.destination`) is
+// chosen by the server, not the client — reading it back is not traversal (independent set v4, 2026-11-01 : 2 blocking
+// FP rows, LibreChat avatar + assistants uploads). `req.file.originalname` stays a source. Path traversal only : the
+// shared FRAMEWORK_SOURCE keeps `req.file` for the packs where the client-chosen fields matter.
+const HEISEN_STORED_UPLOAD = /\breq\s*\.\s*files?\b(?:\s*\[[^\]]*\]|\s*\.\s*[A-Za-z_$][\w$]*)?(?:\s*\[[^\]]*\])?\s*\.\s*(?:path|destination)\b/g;
+
 /** Scan one file → [{line, kind}]. Direct regex + path-traversal taint. Source line NEVER leaves this function. */
 export function extractPathTraversal(text, importedWrappers, file) {
   const out = [];
   if (isPackedSource(text) || isDecompiledSource(text, file)) return out;   // a vendored / packed build, or decompiler output (lang-scope.mjs)
-  const lines = logicalLines(String(text).split(/\r?\n/));   // statements broken across lines read whole (lang-scope.mjs)
+  const lines = logicalLines(String(text).split(/\r?\n/)).map((l) => l.replace(HEISEN_STORED_UPLOAD, "heisenStoredUpload"));   // statements read whole ; stored upload paths neutral
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
     if (l.length > 4000) continue;   // minified blob — noise

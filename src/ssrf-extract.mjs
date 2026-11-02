@@ -14,7 +14,7 @@
 // job). The direct patterns are unchanged; the taint pass is additive.
 
 // ── Sink vocabulary (parametrised by the file's client group so `import requests as r` is tracked) ───────────────
-import { logicalLines } from "./lang-scope.mjs";
+import { logicalLines, kindAppliesToFile as heisenKindAppliesToFile } from "./lang-scope.mjs";
 const PY_BASE = "requests|httpx|session";                 // base Python HTTP clients (aliases appended per file)
 const NODE_C = "fetch|axios|got|superagent|needle";       // Node HTTP clients
 const VERBS = "get|post|put|delete|patch|head|request";   // HTTP verbs
@@ -55,7 +55,8 @@ function directPatterns(pyClients) {
     // `open` must be a BARE call (or URI./Kernel.) and the arg `params[…]` / `params.require…` — real-code corpus FP:
     // `fs.open(params.filePath)`, `root.open(params.relativePath)`, a TS method `open(params: T)` (a function-param
     // object named params, not Rails user input, and a file open, not an HTTP fetch).
-    ["ruby-http", /\b(?:Net::HTTP\s*\.\s*(?:get|post|get_response)|HTTParty\s*\.\s*(?:get|post)|Faraday\s*\.\s*(?:get|post))\s*\(\s*params\b|(?:(?<![\w.:$])open|\b(?:URI|Kernel)\s*\.\s*open)\s*\(\s*params\s*[[.]/],
+    // Ruby URI(params[:url]) still supplies the HTTP URL (independent set v2, 2026-11-01).
+    ["ruby-http", /\b(?:Net::HTTP\s*\.\s*(?:get|post|get_response)|HTTParty\s*\.\s*(?:get|post)|Faraday\s*\.\s*(?:get|post))\s*\(\s*(?:URI\s*\(\s*)?params\b|(?:(?<![\w.:$])open|\b(?:URI|Kernel)\s*\.\s*open)\s*\(\s*params\s*[[.]/],
   ];
 }
 
@@ -64,6 +65,22 @@ import { FRAMEWORK_SOURCE, paramSources } from "./sources.mjs";
 import { findSinkWrappers, interprocHit } from "./taint-interproc.mjs";
 
 const isComment = (l) => /^\s*(\/\/|\*|#|--|;|<!--)/.test(l);
+
+// An SSRF needs the attacker to choose the HOST. At the sink, the URL argument's text BEFORE the first user value is
+// read : when it already holds a literal path / query / fragment separator (`/`, `?`, `#` — a scheme's `://` does not
+// count), the origin is fixed and the user value only picks a path or a query parameter. `${BASE}/jobs/${id}`,
+// f"{url}/{pipeline_id}", `${SUB_URL}wp-json/wp/v2/posts?per_page=${limit}` (independent sets v2 + v3, 2026-11-01 :
+// 5 blocking FP rows). Still an SSRF : `${proto}://${host}`, `"https://" + u`, `base + u`, `u + "/x"` (the user value
+// comes before any separator). Same rule as hostControllingVar, applied at the sink.
+// `m` = the sink match (it starts at the client name), `user` = a RegExp for the user value(s) on this line.
+function heisenFixedOrigin(m, user) {
+  const text = m[0], open = text.indexOf("(");
+  if (open < 0) return false;
+  const arg = text.slice(open + 1).replace(new RegExp(`^\\s*${METH}`), "");
+  const u = new RegExp(user.source, user.flags.replace("g", "")).exec(arg);
+  if (!u) return false;
+  return /[/?#]/.test(arg.slice(0, u.index).replace(/:\/\//g, ""));   // any `://` (a literal scheme or `${proto}://`)
+}
 
 // A cheap file-level gate: no HTTP-client token anywhere ⇒ no possible SSRF sink ⇒ skip the inter-procedural pass.
 const HAS_SINK = /\b(?:requests|httpx|session|urlopen|fetch|axios|got|superagent|needle)\b|\bhttps?\s*\.\s*(?:get|request)/;
@@ -110,12 +127,18 @@ function taintPass(lines, text, importedWrappers) {
     : new Map();
   const imported = importedWrappers instanceof Map ? importedWrappers : new Map();
   const dangerous = (taint) => (a) => SSRF_SOURCE.test(a) || [...taint.keys()].some((v) => mentions(v, a));
+  // an opted-in source (CLI argv / queue payload, sources.mjs) carries the file's language, not the line's
+  const fileTag = /^\s*(?:async\s+)?def\s/m.test(text) ? "py" : "node";
   return runTaintPass(lines, {
-    paramSources, paramTag: (l) => (/^\s*(?:async\s+)?def\s/.test(l) ? "py" : "node"),
+    paramSources, paramTag: (l) => (/^\s*(?:async\s+)?def\s/.test(l) ? "py" : "node"), optInTag: () => fileTag,
     sanitizer: SSRF_SANITIZE,
     checkSinks(l, taint, emit) {
       for (const [v, lang] of taint) {
-        if ((lang === "py" ? pySinkFile(v) : nodeSink(v)).test(l)) { emit(lang === "py" ? "py-taint" : "node-taint"); return; }
+        const m = (lang === "py" ? pySinkFile(v) : nodeSink(v)).exec(l);
+        if (!m) continue;
+        const user = new RegExp(`\\b(?:${[...taint.keys()].map(escapeVar).join("|")})\\b|${SSRF_SOURCE.source}`);
+        if (heisenFixedOrigin(m, user)) continue;   // a fixed origin : the user value picks a path / query only
+        emit(lang === "py" ? "py-taint" : "node-taint"); return;
       }
       // Inter-procedural: a tainted var OR an inline user source at a flowing arg position of a LOCAL sink-wrapper.
       if (wrappers.size && interprocHit(l, wrappers, dangerous(taint))) { emit("taint-interproc"); return; }
@@ -165,7 +188,7 @@ function hostControllingVar(rhs, taint) {
  * `importedWrappers` (optional) — a Map<localName, Set<flowingIdx>> resolved by the walker from the repo registry;
  * enables the cross-file layer. Omit it for a single-file scan (intra + local inter-procedural only).
  */
-export function extractSsrf(text, importedWrappers) {
+export function extractSsrf(text, importedWrappers, heisenFile) {
   const out = [];
   const lines = logicalLines(String(text).split(/\r?\n/));   // statements broken across lines read whole (lang-scope.mjs)
   const patterns = directPatterns(pyClientGroup(text));   // per-file: client group includes `import requests as r`
@@ -174,7 +197,12 @@ export function extractSsrf(text, importedWrappers) {
     if (l.length > 4000) continue;   // minified blob — noise
     if (isComment(l)) continue;      // a sink named in a comment is documentation, not live code
     for (const [kind, re] of patterns) {
-      if (re.test(l)) out.push({ line: i + 1, kind });
+      // Python open(params[...]) is local file I/O, not Rails input (independent set v2, 2026-11-01).
+      if (kind === "ruby-http" && !heisenKindAppliesToFile(kind, heisenFile)) continue;
+      const m = re.exec(l);
+      if (!m) continue;
+      if (kind === "http-concat" && heisenFixedOrigin(m, SSRF_SOURCE)) continue;   // a fixed origin (see heisenFixedOrigin)
+      out.push({ line: i + 1, kind });
     }
   }
   for (const h of taintPass(lines, text, importedWrappers)) out.push(h);
@@ -183,5 +211,5 @@ export function extractSsrf(text, importedWrappers) {
 
 /** The SSRF fingerprint for one file — locations + kinds, no source. `importedWrappers` enables the cross-file layer. */
 export function extractSsrfFingerprint(text, file, importedWrappers) {
-  return { file, hits: extractSsrf(text, importedWrappers) };
+  return { file, hits: extractSsrf(text, importedWrappers, file) };
 }

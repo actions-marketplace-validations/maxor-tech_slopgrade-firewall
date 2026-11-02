@@ -5,14 +5,36 @@ All notable changes to the open-source slopGrade Firewall client are documented 
 
 ## [Unreleased]
 
+### Added
+- **Opt-in untrusted sources** : the Action input `untrusted-inputs: "cli,queue"` makes CLI arguments (`sys.argv`,
+  argparse values, `process.argv`, `os.Args`, `ARGV`) and / or queue payloads (SQS / Lambda records, Kafka / RabbitMQ /
+  Pub-Sub message bodies) untrusted for the injection checks of THIS repo. Off by default : a CLI tool runs with its own
+  user's privileges. The run log names what was turned on.
+
+### Fixed
+- Found by the second independent test set (v2, 600 other unseen repos, labelled blind) :
+  - SSRF : the Ruby `open(params[…])` / `Net::HTTP` rule applies to Ruby files only — a Python
+    `open(params["path"], "w")` is a dict lookup and a file write. `Net::HTTP.get(URI(params[:url]))` now fires.
+  - XXE : `const LIBXML_NOENT = …` declares the constant ; it passes no flag to a parser.
+
 ## [0.13.0] — 2026-11-01
 
-Depth release (expert-panel roadmap) : statements instead of physical lines, sanitizers by their effect, framework /
-MCP / LLM sources, ORM by-id access, SnakeYAML version awareness, a verdict receipt and scoped exceptions. Mutation
-invariance : a call split across lines 3/9 → 9/9, several statements on one line 0/13 → 13/13. Cross-tenant (BOLA)
-benchmark : 12/12 vulnerable cases flagged, 1/13 false flag (advisory).
+Depth release (expert-panel roadmap) : SQL injection read on the syntax tree (tree-sitter, vendored), statements
+instead of physical lines, sanitizers by their effect, framework / MCP / LLM sources, ORM by-id access, SnakeYAML
+version awareness, a verdict receipt and scoped exceptions. Mutation invariance : a call split across lines 3/9 → 9/9,
+several statements on one line 0/13 → 13/13. Cross-tenant (BOLA) benchmark : 12/12 vulnerable cases flagged, 1/13 false
+flag (advisory).
 
 ### Added
+- **SQL injection on the syntax tree** for Python, JavaScript and TypeScript (`src/ts-ir.mjs`, `src/sqli-ir.mjs`,
+  `src/sqli-best.mjs`). The tree reads expressions, not lines : only a sink's first argument is the statement (a bound
+  parameter is safe), values flow through assignments / destructuring / tuples, placeholder lists
+  (`','.join('?' for _ in xs)`) are constant text. The line reader's inter-procedural and cross-file hits are kept.
+  Measured on 5,300 public repos : every shared hit kept, the product-code false flags of the line reader removed, no
+  new product-code hit. Other languages keep the line reader.
+- `vendor/tree-sitter/` : the tree-sitter runtime and four grammars, copied unchanged from
+  `@vscode/tree-sitter-wasm@0.3.1` (MIT, WebAssembly — no native code, no install, no network ; hashes in its
+  `NOTICE.md`). If it cannot load, every file keeps the line reader.
 - **ORM by-id access** (`src/orm-access.mjs`) for the cross-tenant check : Django ORM (`Model.objects.get(pk=…)`,
   `get_object_or_404`), ActiveRecord (`Model.find`, `find_by`), Spring Data (`xRepository.findById`,
   `findByIdAndOrgId`) and GORM (`db.First(&m, "id = ?", …)`), with each ORM's model columns (models.py, db/schema.rb,
@@ -48,6 +70,11 @@ benchmark : 12/12 vulnerable cases flagged, 1/13 false flag (advisory).
   in a JS / Python file used to switch the injection extractors off for the whole file. No labelled row changes.
 
 ### Fixed
+- Found by an independent test set (178 findings on 600 repos never used for tuning, labelled blind) :
+  - path traversal : `Image.open(BytesIO(data))`, `pdfplumber.open(BytesIO(...))`, `Image.open(upload.file)` decode an
+    uploaded in-memory stream, not a path. The same `.open` on a request-chosen path still fires.
+  - `weakCrypto` : an `"rc4"` object key, module metadata (`name: "rc4"`), or a label map (`'arc4': 'ARC4'`) names a
+    module or an option ; a cipher setting (`cipher: "rc4"`) and an API use still fire.
 - Cross-tenant : a Prisma `where: { id }` **shorthand** is an id constraint. `update({ where: { id }, data })` was
   read as an unscoped update, a false hard leak that blocked the build. Found by the new BOLA benchmark.
 - ORM IDOR advisories (measured on 5,300 public repos) : a controller that uses Pundit / CanCan / Django object

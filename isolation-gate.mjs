@@ -27,7 +27,11 @@ import { walk } from "./src/extract.mjs";
 import { buildFingerprint } from "./src/fingerprint.mjs";
 import { receiptLine } from "./src/receipt.mjs";
 // The 10 flagship classes (base + go/dotnet variants where they exist).
-import { extractSqliFingerprint, sqliWrapperCfg } from "./src/sqli-extract.mjs";
+import { sqliWrapperCfg } from "./src/sqli-extract.mjs";
+import { extractSqliFingerprintBest } from "./src/sqli-best.mjs";
+import { initIr } from "./src/ts-ir.mjs";
+import { vendoredRuntime } from "./src/ts-vendor.mjs";
+import { setOptInSources, optInTokens } from "./src/sources.mjs";
 import { extractGoSqliFingerprint } from "./src/gosqli-extract.mjs";
 import { extractDotnetSqliFingerprint } from "./src/dotnetsqli-extract.mjs";
 import { extractCmdiFingerprint, cmdiWrapperCfg } from "./src/cmdi-extract.mjs";
@@ -282,6 +286,14 @@ export async function main(argv = [], env = process.env) {
   const purposeAdvisory = purpose.purpose !== "product";
   if (purpose.override) line(`slopGrade Firewall: ${sanitizeLogLine(purpose.why)} — blocking stays on.`);
   try {
+    // SQL injection on the syntax tree for Python / JS / TS (src/sqli-best.mjs) — the vendored runtime ; any failure
+    // keeps the line reader for every file.
+    try { const vr = vendoredRuntime(); if (vr) await initIr(undefined, vr); } catch { /* line reader */ }
+    // Opt-in untrusted sources (Action input `untrusted-inputs`, e.g. "cli,queue") : off unless this repo asks.
+    const optIn = setOptInSources(env.FW_UNTRUSTED_INPUTS);
+    if (optIn.length) line(`slopGrade Firewall: extra untrusted sources on for this repo : ${optIn.join(", ")}.`);
+    const unknownInputs = optInTokens(env.FW_UNTRUSTED_INPUTS).filter((t) => !optIn.includes(t));
+    if (unknownInputs.length) ghWarn(`untrusted-inputs : ignored ${unknownInputs.join(", ")} — the known values are cli and queue.`);
     const walked = walk(root, CODE_EXTS);
     files = walked.filter((f) => !isIgnored(rel(f)));
     ignoredCount = walked.length - files.length;
@@ -304,7 +316,7 @@ export async function main(argv = [], env = process.env) {
     for (const f of files) {
       let t; try { t = readFileSync(f, "utf8"); } catch { continue; }
       const r = rel(f);
-      const sqf = extractSqliFingerprint(t, r, resolveImportedWrappers(t, r, xfileRegs.sqli)); if (sqf.hits.length) sqliFingerprint.files.push(sqf);
+      const sqf = extractSqliFingerprintBest(t, r, resolveImportedWrappers(t, r, xfileRegs.sqli)); if (sqf.hits.length) sqliFingerprint.files.push(sqf);
       const gqf = extractGoSqliFingerprint(t, r); if (gqf.hits.length) goSqliFingerprint.files.push(gqf);
       const dqf = extractDotnetSqliFingerprint(t, r); if (dqf.hits.length) dotnetSqliFingerprint.files.push(dqf);
       const mf = extractCmdiFingerprint(t, r, resolveImportedWrappers(t, r, xfileRegs.cmdi)); if (mf.hits.length) cmdiFingerprint.files.push(mf);
