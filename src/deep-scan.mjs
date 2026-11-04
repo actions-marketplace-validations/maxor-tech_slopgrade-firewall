@@ -340,6 +340,20 @@ export function splitAgainstFeed(rows, feed) {
  * `gateEntitled` is also true for public and free-oss repos (they have the free gate but not the paid catalogue), so it
  * is only a fallback for a server that predates `gateLevel`.
  */
+/** A public repo gets the taint scan free (server slopgrade#1618) : its source is already public. Never change review. */
+export const isPublicVerdict = (v) => !!v && v.gateLevel === "public";
+
+/**
+ * Is this run's repo public, per the runner's own GitHub OIDC token ? The same signed claim the server reads, here only
+ * decoded : the "auto" default needs it for a PAID public repo, whose verdict says "paid". Anything else is private, so
+ * a token this code cannot read keeps the source on the runner.
+ */
+export function oidcRepoIsPublic(token) {
+  try {
+    return JSON.parse(Buffer.from(String(token).split(".")[1], "base64url").toString("utf8")).repository_visibility === "public";
+  } catch { return false; }
+}
+
 export function isPaidVerdict(v) {
   if (v && typeof v.gateLevel === "string") return v.gateLevel === "paid";
   return !!v && v.gateEntitled === true;
@@ -353,7 +367,7 @@ export function isPaidVerdict(v) {
 export function deepScanNudge({ deepScan, paid }) {
   if (deepScan || paid !== true) return null;
   return "Deep scan available on this paid repo: add `deep-scan: \"true\"` to follow request values across functions "
-    + "(flows the packs above cannot see). Opt-in — the one mode that sends source; see the Action README.";
+    + "(flows the packs above cannot see). Opt-in on a private repo — the one mode that sends source; see the Action README.";
 }
 
 /**
