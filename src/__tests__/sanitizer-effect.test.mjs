@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import { extractXss } from "../xss-extract.mjs";
 import { extractSqli } from "../sqli-extract.mjs";
 import { extractSsrf } from "../ssrf-extract.mjs";
+import { extractPathTraversal } from "../pathtraversal-extract.mjs";
 
 const n = (hits) => hits.length;
 const xss = (body) => n(extractXss(`app.get('/x', (req, res) => {\n  const h = req.query.h;\n${body}\n});`, new Map(), "x.js"));
@@ -40,4 +41,29 @@ test("striptags : Markup(request...).striptags() is plain text ; Markup(request.
   const py = (line) => extractXss(`@app.route("/n")\ndef n():\n    name = ${line}\n    return "<p>" + name + "</p>"\n`, new Map(), "app.py").map((h) => h.line);
   assert.deepEqual(py('Markup(request.args["n"]).striptags()'), []);
   assert.deepEqual(py('Markup(request.args["n"])'), [3]);
+});
+
+// Value-flow exemptions (2026-11-02, mirror of maxor-tech/slopgrade#1599) : a constant ternary, a constant table entry,
+// a non-HTML response, an inline character strip. Each has a CONTROL that still fires.
+test("value flow : constant ternary, constant table, non-HTML response, inline strip are not HTML sinks", () => {
+  const L = (c, f) => extractXss(c, new Map(), f).map((h) => h.line);
+  assert.deepEqual(L(`<input <?php echo $_COOKIE ["split"] ? ' checked' : ''; ?> />\n`, "boxes.php"), []);
+  assert.deepEqual(L(`<p><?php echo $_COOKIE["split"]; ?></p>\n`, "boxes.php"), [1]);
+  assert.deepEqual(L("function b(el) {\n  const v = location.hash.slice(1);\n  el.innerHTML = ICONS[v];\n}\n", "c.js"), []);
+  assert.deepEqual(L("function b(el) {\n  const v = location.hash.slice(1);\n  el.innerHTML = v;\n}\n", "c.js"), [3]);
+  assert.deepEqual(L("app.get('/pl', (req, res) => {\n  res.setHeader('Content-Disposition', 'attachment; filename=a.xspf');\n  res.send('<track>' + req.query.name);\n});\n", "p.js"), []);
+  assert.deepEqual(L("app.get('/p', (req, res) => {\n  res.send('<h1>' + req.query.name);\n});\n", "p.js"), [2]);
+  const strip = (s) => "function px(div, Xt_i) {\n  var Xt_r = document.referrer;\n  div.innerHTML = Xt_i + '&ref=' + Xt_r" + s + " + '\" title=\"x\">';\n}\n";
+  assert.deepEqual(L(strip(".replace(/[<>\"]/g, '')"), "s.js"), []);
+  assert.deepEqual(L(strip(""), "s.js"), [3]);
+});
+
+// Path-traversal sanitizer summaries (2026-11-02, mirror of maxor-tech/slopgrade#1604) : a same-file helper whose BODY
+// contains the path cleans its result ; a helper that only joins keeps the taint.
+test("path : a containing helper cleans its result ; a plain joiner keeps the taint", () => {
+  const L = (c, f) => extractPathTraversal(c, new Map(), f).map((h) => h.line);
+  const safe = ["function getFilename(name) {", "  if (name.includes('..')) throw new Error('bad');", "  return path.join(DIR, name);", "}",
+    "app.get('/s', (req, res) => {", "  const filename = getFilename(req.query.name);", "  fs.unlink(path.join(DIR, filename), () => res.end());", "});", ""].join("\n");
+  assert.deepEqual(L(safe, "service.js"), []);
+  assert.deepEqual(L(safe.replace("  if (name.includes('..')) throw new Error('bad');\n", ""), "service.js"), [6]);
 });

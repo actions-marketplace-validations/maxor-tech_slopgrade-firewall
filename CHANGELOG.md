@@ -5,6 +5,60 @@ All notable changes to the open-source slopGrade Firewall client are documented 
 
 ## [Unreleased]
 
+## [0.13.4] — 2026-11-04
+
+### Changed
+- **The « review suggested » band no longer names JS/TS and Python.** A pre-registered check on never-used repos
+  (READ-R32, read once, live engine) measured the band at 15.2 % (JS/TS, 525 commits) and 15.9 % (Python, 327) of fresh
+  ordinary commits flagged, above the 12.5 % bar ; the server removed both bands (slopgrade#1616). Go (12.4 %), Java (8.4 %)
+  and PHP (11.1 %) were confirmed ; Ruby (136 commits) stays unconfirmed. The heading, note and action.yml now name only
+  the four languages. Triage notices are unchanged for every language.
+
+## [0.13.3] — 2026-11-03
+
+### Changed
+- **The « review suggested » band covers Python, Go, Java, PHP and Ruby** (server 2026-11-03, each language at its own
+  cut = 10 % of its ordinary commits flagged). Real CVE-introducing commits that get a notice with the band : Python 47 %
+  (731 commits, live served model), Go 46 % (970), Java 42 % (1,027), PHP 48 % (993), Ruby 34 % (233 — small pool) on
+  the SZZ held-out ; JS/TS 39 % as in 0.13.2. The run-log heading and note name every language with its rate.
+
+### Fixed
+- **`library-mode: auto` no longer explains itself on application repos** : since 0.13.1 the default turned library mode on
+  for every paid run, so every application repo read « library mode requested, but this repo looks like an application »
+  (seen live on slopgrade#1612). Under the `"auto"` default (`--library-mode-auto`) an application now hears nothing ;
+  an explicit `library-mode: "true"` still prints the explanation. Same for `change-review: auto` on a push run : no more
+  « change review: not a pull request run — nothing reviewed » on every push (`--change-review-auto`) ; a pull request
+  whose base git cannot diff still says so.
+
+## [0.13.2] — 2026-11-03
+
+### Added
+- **Change review : a « review suggested » band** (JavaScript / TypeScript, paid repos, needs the server of 2026-11-03).
+  Up to 5 hunks that score just under the triage threshold print as notices titled `slopGrade change review (review
+  suggested)`, apart from the triage notices, never blocking. Measured on the served model : with them, 39 % of 304 real
+  JS CVE-introducing commits get a notice vs 10 % of 13,597 ordinary commits ; the triage notices alone give 13 % vs 2 %.
+  Other languages get no band until their own curve is measured.
+
+### Fixed
+- **The change-review claim was cut mid-word in the run log** : it was appended to the summary line, and every log line
+  is cut at 240 characters. It now prints on its own line, whole.
+
+## [0.13.1] — 2026-11-03
+
+### Changed
+- **Deep scan on by default for paid repos** : `deep-scan`, `change-review` and `library-mode` default to `"auto"`.
+  On a **paid** repo the Action now sends the source of the sink-bearing files and the PR's diff hunks to the hosted
+  engine (taint engine + the diff-reading 55M), and says so in the log on every run (`--deep-scan-auto`). A free or
+  public repo sends nothing and prints nothing about it, exactly as before. Why : the static packs catch almost no real
+  CVE code (0 paired blocks on the 8,277 of 8,669 OSV real-CVE pairs that are not PHP superglobal reads) ; the diff reviewer flags
+  19 % of real CVE-introducing commits vs 2.1 % of ordinary commits. All three stay notices, never blocking
+  (`deep-scan-block` is still opt-in). Opt out with `deep-scan: "false"` ; `"true"` keeps the old explicit mode.
+- **Repo-purpose classifier on by default** : in a course, lab, CTF, webshell or offensive-tool repo, pack and Deep
+  Scan blocks become advisory annotations (the reason is printed in the log; cross-tenant leaks still block).
+  Measured on the blind-labelled blocking rows : xss 52/87 → 51/73, 13 of the 14 removed rows were not true positives.
+  Keep blocking on with `purpose: product` in `.slopgrade.yml`, or turn the classifier off with
+  `SLOPGRADE_PURPOSE_CLASSIFIER=off`.
+
 ### Added
 - **Opt-in untrusted sources** : the Action input `untrusted-inputs: "cli,queue"` makes CLI arguments (`sys.argv`,
   argparse values, `process.argv`, `os.Args`, `ARGV`) and / or queue payloads (SQS / Lambda records, Kafka / RabbitMQ /
@@ -16,6 +70,12 @@ All notable changes to the open-source slopGrade Firewall client are documented 
   pre-pass that throws, runs every pack as before.
 
 ### Fixed
+- **Path traversal** : a value returned by a helper in the same file whose body sanitizes or contains the path
+  (basename / realpath + startswith / commonpath / a `..` check) is no longer a traversal source ; a helper that only
+  joins keeps the taint (mirror of maxor-tech/slopgrade#1604).
+- **XSS value flow** : a superglobal that only selects one of two literals, `innerHTML` from a constant table entry, a
+  response that is not HTML (attachment, XML, JSON, plain text) and an inline `<>"` strip no longer count as an HTML sink
+  (blind-labelled evidence harvests v7 / v8, 2026-11-02 ; mirror of maxor-tech/slopgrade#1599).
 - **XSS** : Jinja `Markup(...).striptags()` and PHP `strip_tags` return plain text with every tag removed, so they no
   longer count as an HTML sink value (found by the targeted evidence harvest v7, 2026-11-02, labelled blind).
 - Found by the second independent test set (v2, 600 other unseen repos, labelled blind) :
