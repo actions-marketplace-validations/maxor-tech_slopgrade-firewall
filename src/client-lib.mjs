@@ -4,7 +4,7 @@ import { gzipSync } from "node:zlib"; // builtin, pure (no I/O) — for the Code
 import { verify as edVerify, createPublicKey } from "node:crypto"; // builtin — Ed25519 verify of the pro-bundle signature.
 
 export const DEFAULT_ORIGIN = "https://app.slopgrade.ai";
-export const CLIENT_VERSION = "0.13.6"; // keep in lock-step with package.json (pinned by client-lib.test.mjs)
+export const CLIENT_VERSION = "0.13.8"; // keep in lock-step with package.json (pinned by client-lib.test.mjs)
 export const FINGERPRINT_VERSION = 1;
 export const MAX_PAYLOAD_BYTES = 8 * 1024 * 1024; // 8MB hard cap on the POST body (clear error, not an opaque 413)
 /** The pro-extractor bundle a PAID repo receives from /api/ci/pro-extractors — bounded like every other input. */
@@ -140,7 +140,7 @@ export function refusalLine(status, body) {
  */
 // Coerce to a bounded identifier string — the boundary must not trust the shape of names/paths coming from the
 // extractor, so a future extractor bug can never let a source-bearing value ride through tableCols/rls untouched.
-const ident = (x) => String(x).replace(/[ --]/g, "").slice(0, 200);
+const ident = (x) => String(x).replace(/[\x00-\x1f\x7f-\x9f]/g, "").slice(0, 200);
 
 // rls.loc = { table: { file, line } }  the table's definition site, so an rls leak can be scoped to the PR that touches it
 // (P9). Untrusted at this boundary: d 200 entries, table/file d 300 chars, line a positive integer, file a repo-relative

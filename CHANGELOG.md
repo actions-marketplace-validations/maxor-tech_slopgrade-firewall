@@ -5,6 +5,20 @@ All notable changes to the open-source slopGrade Firewall client are documented 
 
 ## [Unreleased]
 
+## [0.13.8] — 2026-11-04
+
+### Fixed
+- **The deep scan summary keeps its finding count.** 0.13.7 put the unanswered paths in the summary line. A log line is
+  capped at 240 characters, so long paths cut off the rest of the line. The paths now have their own line.
+
+## [0.13.7] — 2026-11-04
+
+### Fixed
+- **The deep scan log names the files it did not answer.** It used to print only a count, so a reader could not see
+  which files the scan never covered. At most 5 are named, then `+N more`.
+- **`src/client-lib.mjs` is scanned again.** It held raw NUL bytes in a regular expression, and the engine refuses such
+  a file whole. The expression is now written with escapes and matches the same characters.
+
 ## [0.13.6] — 2026-11-04
 
 ### Changed

@@ -295,6 +295,23 @@ export const CANDIDATES_RANKED_NOTE = "ordered by what this repo fixed before: c
 /** How a maintainer quiets a candidate they reviewed — the same marker as findings, honoured on candidates since heisen-slop aea8aa9. */
 export const CANDIDATE_DISMISS_HINT = "reviewed and not a bug? add a `heisen-ignore: <reason>` comment on the sink line (or on a comment line just above) — it is dismissed from the next run and counted as such.";
 
+export const UNANSWERED_NAMED_MAX = 5;
+
+/** The summary clause for files the engine did not answer. Count only: sanitizeLogLine caps a line at 240 characters, so
+ *  paths in the summary push out the finding count that follows them. Empty when every file was answered. */
+export function unansweredNote(count) {
+  return count ? ` · ${count} unanswered (partial)` : "";
+}
+
+/** The log line that names the unanswered files, so a reader can see what the scan never covered. Empty when the server
+ *  sent no usable paths. */
+export function unansweredFiles(paths) {
+  const named = Array.isArray(paths) ? paths.filter((p) => typeof p === "string" && p) : [];
+  if (!named.length) return "";
+  const more = named.length - UNANSWERED_NAMED_MAX;
+  return `slopGrade Firewall — unanswered files: ${named.slice(0, UNANSWERED_NAMED_MAX).join(", ")}${more > 0 ? ` +${more} more` : ""}`;
+}
+
 /** Shape check of the server answer; anything else is treated as no answer (fail open). */
 export function validHeisenResponse(j) {
   if (!j || typeof j !== "object" || j.ok !== true || !Array.isArray(j.findings)) return false;
