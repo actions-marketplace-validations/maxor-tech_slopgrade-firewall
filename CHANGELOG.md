@@ -5,6 +5,60 @@ All notable changes to the open-source slopGrade Firewall client are documented 
 
 ## [Unreleased]
 
+## [0.15.2] — 2026-11-09
+
+### Fixed
+- **An advisory cross-tenant leak no longer blocks the PR that introduces it.** The server marks a by-id IDOR finding
+  (`idor-by-id`) advisory and never counts it as a hard leak, but the client dropped that flag: the finding became a
+  blocking cross-tenant row, and in gate mode a PR that added its line was blocked while the server reported 0 hard
+  leaks. It now prints as a warning, reads « (advisory) », and never counts toward the block. 250 of the 61,661 repos
+  of the release benchmark carry such findings, 23 of them on a verdict that can block. A hard leak blocks as before.
+
+## [0.15.1] — 2026-11-09
+
+### Changed
+- **The AI review states what it measures on AI-written code.** On 8,165 public commits with an AI co-author trailer,
+  `claude-opus-5-5` flagged 126 (1.5 %). A blind second reviewer judged 72 of the 87 flags it could decide real (83 %,
+  95 % CI 74–89 %); in 811 unflagged commits it found a flaw in 18 (2.2 %), so about 3 in 10 flawed commits get a flag.
+  The run log line and the README say so.
+- **The cost figure is the one for AI-written PRs**, which are larger than CVE fixes: median $0.027, mean $0.044, 9 in
+  10 under $0.11, the largest $0.38 (was median $0.016 on 90 CVE commits).
+- The README no longer says the hosted review is off: it is on for paid repos. Anthropic does not train on the code
+  and deletes it within 30 days.
+
+## [0.15.0] — 2026-11-09
+
+### Added
+- **Hosted AI review on a paid slot.** With `ai-review: "true"` and no `ai-review-key`, a paid repo sends the PR hunks
+  (the same order and budget as with your own key) to `app.slopgrade.ai/api/ci/ai-review` after the verdict, with the
+  run's OIDC proof. slopGrade runs the default model with its key and drops the code; only counts are kept. A free repo
+  with no key sends nothing and reads one warning. Notices only, never blocking; a refusal (no paid slot, not turned on
+  yet, daily cap of 200, provider error) prints one warning with the reason.
+
+## [0.14.1] — 2026-11-09
+
+### Added
+- **The AI review states what it cost.** The run log prints the input and output tokens your provider billed for the
+  call, read from the provider's answer (never estimated; absent when the provider does not return them). Measured on
+  90 commits with `claude-opus-5-5` at list price: median $0.016 per PR, 9 in 10 under $0.05, the largest $0.13.
+
+## [0.14.0] — 2026-11-09
+
+### Added
+- **AI review, opt-in, with your own key** (`ai-review: "true"`, `ai-review-key`, `ai-review-model`; pull requests
+  only; default off). A reasoning model reads every hunk of the PR (no 64-hunk cap) and lists the hunks whose change
+  introduces an exploitable flaw. The call goes from your runner to Anthropic with your key; nothing passes through
+  slopGrade. Flags are notices on their file and line and never change the verdict. Every error prints one warning and
+  the run goes on. Source hunks are sent before tests, docs and generated files, so padding cannot push code past the
+  400,000-character budget.
+- **Measured, blind, with this module** (flag = confidence ≥ 0.5): with the default `claude-opus-5-5`, 88 of 100
+  validation CVE changes and 56 of 60 CVEs published after the model's cutoff were flagged; 15 of 600 ordinary commits
+  were flagged, and 10 of those match a published CVE of the same class in that repo (5, 0.8 %, match none). Any other model is stated as unmeasured in the run log.
+
+### Changed
+- **What leaves your runner:** with `ai-review` on, the PR's changed lines (3 lines of context) go to Anthropic. With it
+  off, nothing changes.
+
 ## [0.13.11] — 2026-11-08
 
 ### Fixed

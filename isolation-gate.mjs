@@ -59,7 +59,7 @@ import { firewallVerdict } from "./src/gate-verdict.mjs";
 import { postFindingReview, resolvePrContext, fetchPrDiff, classifyAgainstDiff, scopedBlocking, diffSummaryMarkdown, gateScopeOf } from "./src/pr-suggest.mjs";
 import {
   resolveOrigin, DEFAULT_ORIGIN, classifyEnv, validVerdict, sanitizeLogLine, sanitizeFingerprint, sanitizePackFingerprints,
-  parseLeak, leakText, findingLocation, buildSarif, collectPackBlocks, advisoryLevel, advisoryOrder, advisorySeverity, errMsg, CLIENT_VERSION, FINGERPRINT_VERSION, MAX_PAYLOAD_BYTES,
+  parseLeak, leakFeedRow, leakText, findingLocation, buildSarif, collectPackBlocks, advisoryLevel, advisoryOrder, advisorySeverity, errMsg, CLIENT_VERSION, FINGERPRINT_VERSION, MAX_PAYLOAD_BYTES,
   validProBundleResponse, verifyBundleSig, PRO_BUNDLE_PUBKEY, runProPacks, sanitizeProFingerprints, FREE_PACK_COUNT, MAX_SARIF_RESULTS, MAX_PRO_BUNDLE_BYTES,
   githubBlobBase, stepSummaryMarkdown, emitStepSummary, uploadSarifToCodeScanning, emitOutputs, refusalLine,
   advisoryOfferOf, offerLogLine,
@@ -67,6 +67,7 @@ import {
 import { oidcRepoIsPublic, sinkFiles, prChangedPaths, prChangedRanges, selectDeepUnits, requestDeepScan, repoKind, libraryCandidates, candidateOutcomesLine, CANDIDATE_DISMISS_HINT, CANDIDATES_RANKED_NOTE, heisenFeed, splitAgainstFeed, isPaidVerdict, isPublicVerdict, deepScanNudge, unansweredNote, unansweredFiles } from "./src/deep-scan.mjs";
 import { prHunks, validChangeReview, C_HUNK, C_REVIEW_NOTE, CPP_HUNK, CPP_REVIEW_NOTE, RUST_HUNK, RUST_REVIEW_NOTE, noticeHint, unreviewedNote, REVIEW_BAND_NOTE, reviewBandHeading } from "./src/change-review.mjs";
 import { fixableHitIndex, attachFixes } from "./src/autofix.mjs";
+import { aiReview, aiReviewOutput, prAllHunks, requestHostedReview, AI_REVIEW_DEFAULT_MODEL, AI_REVIEW_TIMEOUT_MS } from "./src/ai-review.mjs";
 import { IGNORE_FILE, parseIgnore, ignoreMatcher, readIgnoreText } from "./src/ignore.mjs";
 import { EXCEPTIONS_FILE, parseExceptions, exceptionFor, readExceptionsText } from "./src/exceptions.mjs";
 import { decidePurpose, purposeAdvisoryLine } from "./src/repo-purpose.mjs";
@@ -219,9 +220,13 @@ Usage: node isolation-gate.mjs [--gate] [--strict] [--print-payload] [--sarif <p
                    check). Notices to triage, never blocking. Held-out: 36% of security fixes undone caught at 0.23% false alarms
                    per hunk; on real CVE-introducing commits, 19% of commits flagged vs 2.1% of ordinary commits, the note on the
                    buggy hunk in 3.9% (CVE commits are large, so a commit-level rate is mostly size).
+  --ai-review      OPT-IN, pull requests only (model FW_AI_REVIEW_MODEL, default ${AI_REVIEW_DEFAULT_MODEL}): a reasoning
+                   model reads EVERY PR hunk and lists the changes that introduce a flaw. Notices, never blocking.
+                   With FW_AI_REVIEW_KEY: your runner → your provider, nothing passes through slopGrade. Without a key, on
+                   a PAID slot: the hunks go to slopGrade, which runs the default model with its key and drops them.
   --help           show this help
 Exit codes: 1 only on a gate-blocked verdict (or --strict with no verdict); 0 otherwise (fail open).`;
-const KNOWN_FLAGS = new Set(["--gate", "--strict", "--print-payload", "--help", "--sarif", "--deep-scan", "--deep-scan-auto", "--deep-scan-block", "--block-confidence", "--library-mode", "--library-mode-auto", "--change-review", "--change-review-auto", "--no-fix"]);
+const KNOWN_FLAGS = new Set(["--gate", "--strict", "--print-payload", "--help", "--sarif", "--deep-scan", "--deep-scan-auto", "--deep-scan-block", "--block-confidence", "--library-mode", "--library-mode-auto", "--change-review", "--change-review-auto", "--no-fix", "--ai-review"]);
 
 export async function main(argv = [], env = process.env) {
   if (argv.includes("--help")) { console.log(HELP); return 0; }
@@ -255,6 +260,30 @@ export async function main(argv = [], env = process.env) {
     verdict: "no-verdict", blocked: strict && gateMode,
     "hard-leaks": "", "blocking-findings": "", conformance: "", entitled: "", "sarif-uploaded": false,
   }, appendFileSync);
+
+  // 0. AI review (opt-in) — never blocks ; every failure prints one warning (fail open).
+  //    WITH ai-review-key: runs here, on its own (no slopGrade verdict needed) — your runner → your provider.
+  //    WITHOUT a key: the hunks wait for step 5c, which asks slopGrade to run it on a paid slot (needs the OIDC proof).
+  let aiHostedHunks = null;
+  const printAiReview = (r, model) => {
+    const out = aiReviewOutput(r, model);
+    for (const n of out.notices) console.log(n);
+    for (const l of out.lines) line(l);
+    if (out.warn) ghWarn(out.lines[0]);
+  };
+  if (argv.includes("--ai-review")) {
+    const isPr = env.GITHUB_EVENT_NAME === "pull_request" || env.GITHUB_EVENT_NAME === "pull_request_target";
+    if (isPr) {
+      const gitAi = (args) => execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 15_000, maxBuffer: 64 * 1024 * 1024 });
+      const readEventAi = () => JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, "utf8"));
+      const hunks = prAllHunks(env, readEventAi, gitAi);
+      const model = (env.FW_AI_REVIEW_MODEL || "").trim() || AI_REVIEW_DEFAULT_MODEL;
+      const key = (env.FW_AI_REVIEW_KEY || "").trim();
+      if (!hunks) printAiReview({ error: "git could not diff the PR base", sent: [], skipped: 0 }, model);
+      else if (key) printAiReview(await aiReview({ key, model, hunks }), model);
+      else aiHostedHunks = hunks;
+    }
+  }
 
   // 1. LOCAL — the structural fingerprint (file contents never leave). Wrapped so a crafted repo (symlink cycle)
   //    that makes extraction throw routes through noVerdict(), NOT the entrypoint catch (which fails OPEN).
@@ -504,6 +533,17 @@ export async function main(argv = [], env = process.env) {
     }
   }
 
+  // 5c. HOSTED AI review (ai-review on, no ai-review-key): a PAID slot asks slopGrade to run it with slopGrade's key.
+  //     The hunks go only to the CANONICAL origin, and only once the verdict says this repo is paid. Fail-open.
+  if (aiHostedHunks) {
+    if (origin !== DEFAULT_ORIGIN) ghWarn("AI review skipped — no ai-review-key, and the hosted review runs only on the canonical slopGrade origin.");
+    else if (!paid) printAiReview({ error: "no ai-review-key, and the hosted AI review needs a paid slot — nothing was sent", sent: [], skipped: aiHostedHunks.length, hosted: true }, AI_REVIEW_DEFAULT_MODEL);
+    else {
+      const post = (url, body) => fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body, signal: AbortSignal.timeout(AI_REVIEW_TIMEOUT_MS + 30_000) });
+      printAiReview(await requestHostedReview(post, origin, oidcToken, sha, aiHostedHunks), AI_REVIEW_DEFAULT_MODEL);
+    }
+  }
+
   // 6. Human-readable report (server strings sanitized before hitting the log).
   line(`\nslopGrade Firewall — tenant isolation`);
   line(`  pattern       : ${v.pattern}${v.tenantKey ? ` (key: ${v.tenantKey})` : ""}`);
@@ -520,7 +560,7 @@ export async function main(argv = [], env = process.env) {
   // file (the old `_` replacement pointed at a file that does not exist).
   const wfFile = (f) => sanitizeLogLine(f).replace(/%/g, "%25").replace(/:/g, "%3A").replace(/,/g, "%2C");
   for (const p of (Array.isArray(v.leaks) ? v.leaks : []).map(parseLeak)) {
-    if (p.file) { console.log(`::error file=${wfFile(p.file)},line=${p.line},title=slopGrade Firewall::${p.message}`); feed.push({ file: p.file, line: p.line, pack: "cross-tenant", rule: "cross-tenant", detail: p.message, severity: "high" }); }
+    if (p.file) { console.log(`::${p.advisory ? "warning" : "error"} file=${wfFile(p.file)},line=${p.line},title=slopGrade Firewall${p.advisory ? " (advisory)" : ""}::${p.message}`); feed.push(leakFeedRow(p)); }
   }
   // Every detector pack the server returned — DATA-DRIVEN (collectPackBlocks), never a hardcoded key list: a pack
   // missing from a static list would be silently dropped from the log, the feed and the SARIF (release-audit B-P0-2).
