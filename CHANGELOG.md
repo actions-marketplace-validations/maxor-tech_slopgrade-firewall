@@ -5,6 +5,23 @@ All notable changes to the open-source slopGrade Firewall client are documented 
 
 ## [Unreleased]
 
+### Added
+- **AI review: an entry-point pass.** When a PR adds a network entry point (route, handler, socket event, server, MCP
+  tool — `src/surface-delta.mjs`, deterministic) and the first pass flagged nothing at 0.5, a second focused call checks
+  authentication, ownership, input bounds and rate on each new entry point, and prints flags at confidence ≥ 0.3 as
+  « slopGrade AI review (entry point, triage) » notices. Measured (slopGrade research N3B, pre-registered, 150 fresh
+  AI-written commits in exactly that condition, blind labels): 17 of 19 real flaws caught (89.5 %, CI 68.6–97.1),
+  60.7 % of flags real (CI 42.4–76.4). The surface detector matches the research detector on all 928 labeled commits
+  of the earlier set. With `ai-review-key` only; the hosted path follows. Never blocking.
+
+### Changed
+- **Docs state exactly what leaves the runner, without a « $0 » promise.** The free tier on a private repo still
+  posts only a structural fingerprint; the deep scan and the opt-in AI review send code and are billed (your provider,
+  or token cost on a paid slot).
+- **`deep-scan-block` figures re-measured as shipped in 0.16.0**: on 52,534 replayed pull requests of the 61,661-repo
+  release run it blocked 143, 43 of them for a real flaw (was 245 / 46 on the 2026-10-24 run). Generated from
+  `benchmark-figures.json` by `scripts/sync-pr-figures.mjs`.
+
 ## [0.16.0] — 2026-11-10
 
 ### Changed

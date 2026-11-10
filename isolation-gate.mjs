@@ -67,7 +67,8 @@ import {
 import { oidcRepoIsPublic, sinkFiles, prChangedPaths, prChangedRanges, selectDeepUnits, requestDeepScan, repoKind, libraryCandidates, candidateOutcomesLine, CANDIDATE_DISMISS_HINT, CANDIDATES_RANKED_NOTE, heisenFeed, splitAgainstFeed, toolingPath, isPaidVerdict, isPublicVerdict, deepScanNudge, unansweredNote, unansweredFiles } from "./src/deep-scan.mjs";
 import { prHunks, validChangeReview, C_HUNK, C_REVIEW_NOTE, CPP_HUNK, CPP_REVIEW_NOTE, RUST_HUNK, RUST_REVIEW_NOTE, noticeHint, unreviewedNote, REVIEW_BAND_NOTE, reviewBandHeading } from "./src/change-review.mjs";
 import { fixableHitIndex, attachFixes } from "./src/autofix.mjs";
-import { aiReview, aiReviewOutput, prAllHunks, requestHostedReview, AI_REVIEW_DEFAULT_MODEL, AI_REVIEW_TIMEOUT_MS } from "./src/ai-review.mjs";
+import { aiReview, aiReviewOutput, prAllHunks, requestHostedReview, AI_REVIEW_DEFAULT_MODEL, AI_REVIEW_TIMEOUT_MS, AI_FOCUS_SYSTEM, wantsFocusedPass, focusedResult } from "./src/ai-review.mjs";
+import { surfaceDelta } from "./src/surface-delta.mjs";
 import { IGNORE_FILE, parseIgnore, ignoreMatcher, readIgnoreText } from "./src/ignore.mjs";
 import { EXCEPTIONS_FILE, parseExceptions, exceptionFor, readExceptionsText } from "./src/exceptions.mjs";
 import { decidePurpose, purposeAdvisoryLine } from "./src/repo-purpose.mjs";
@@ -215,7 +216,7 @@ Usage: node isolation-gate.mjs [--gate] [--strict] [--print-payload] [--sarif <p
   --library-mode   OPT-IN, with --deep-scan, PACKAGE repos only: also list library-tier candidates (a public function's
                    parameter reaching a sink) as notices to triage - never findings, never blocking.
                    Block precision: ~94% on benchmark code, ≥78% on real-world CVE code (~1 false block in 4-5);
-                   on 52,089 ordinary open-source pull requests it blocked 245, 46 of them for a real flaw — off by default.
+                   on 52,534 ordinary open-source pull requests it blocked 143, 43 of them for a real flaw — off by default.
   --change-review  OPT-IN, with --deep-scan, pull requests only: ALSO send the PR's diff hunks (changed lines + 3 lines of
                    context, ≤ 64) to the diff-reading 55M, which lists the changes likely to WEAKEN security (a removed
                    check). Notices to triage, never blocking. Held-out: 36% of security fixes undone caught at 0.23% false alarms
@@ -281,8 +282,14 @@ export async function main(argv = [], env = process.env) {
       const model = (env.FW_AI_REVIEW_MODEL || "").trim() || AI_REVIEW_DEFAULT_MODEL;
       const key = (env.FW_AI_REVIEW_KEY || "").trim();
       if (!hunks) printAiReview({ error: "git could not diff the PR base", sent: [], skipped: 0 }, model);
-      else if (key) printAiReview(await aiReview({ key, model, hunks }), model);
-      else aiHostedHunks = hunks;
+      else if (key) {
+        const first = await aiReview({ key, model, hunks });
+        printAiReview(first, model);
+        // Entry-point pass (0.17.0): a PR that adds a route / handler and got no first-pass flag at 0.5 gets a second,
+        // focused call (authentication, ownership, input bound, rate) — the condition it was measured in. Your key only
+        // for now ; the hosted path follows with the server route.
+        if (wantsFocusedPass(surfaceDelta(hunks), first)) printAiReview(focusedResult(await aiReview({ key, model, hunks, system: AI_FOCUS_SYSTEM })), model);
+      } else aiHostedHunks = hunks;
     }
   }
 

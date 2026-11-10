@@ -117,7 +117,7 @@ marked ✓ (the four unmarked — XXE, insecure deserialization, hardcoded secre
 | Broken / weak crypto | CWE-327 | md5 · sha1 · ECB on secrets | |
 | CORS reflected-origin | CWE-942 | cross-origin data leak | ✓ |
 
-## How it works — no source-code egress
+## How it works — what leaves your runner
 
 1. **Local, in your runner** — the client walks your tree and builds a **structural fingerprint**: file paths and
    `{file, line, kind}` per finding. **Your source code, and the contents of your files, never leave the machine.**
@@ -207,7 +207,7 @@ of a public repo says so on every run (how many files and PR hunks were sent, an
   detector pack reported — **fail the check**. What that costs depends on the code, so here are both numbers:
   on labeled **benchmark** code the engine was not tuned on, its blocks are right **68 of 72 (~94%)**; on **real-world
   CVE code** (GitHub advisories, the vulnerable and the fixed version of the same file — held-out split, 2026-10-22)
-  they are right **at least 78% (25 of 32)** — roughly **one false block in four to five**; but **on 52,089 ordinary open-source pull requests it blocked 245, 46 of them for a real flaw** (benchmark of 2026-10-24), so ordinary code sees far more false blocks than the CVE figure suggests. The CVE figure is a floor: every block on
+  they are right **at least 78% (25 of 32)** — roughly **one false block in four to five**; but **on 52,534 ordinary open-source pull requests it blocked 143, 43 of them for a real flaw** (release run of 2026-11-10, rules as shipped in 0.16.0), so ordinary code sees far more false blocks than the CVE figure suggests. The CVE figure is a floor: every block on
   the fixed version counts as false, even where a real flow remains after the fix. Most false blocks come from a project's
   own validation function (`validateId(x)`, `isPathAllowed(x)`) that the engine does not recognise. That is why it is off by default: enable it where a false block is cheaper than a missed flow. A finding on a line another pack already reported is counted as a confirmation, not annotated or
   counted twice. Any failure (timeout, 5xx, malformed answer) is a warning — the verdict is never affected.
@@ -313,6 +313,14 @@ or logic bugs that no taint engine or pattern sees; this is the part of the gate
   Caveats: these are open-source commits, not your code. A flag can still be wrong, and no flag is not a clearance.
   Any other model you set in `ai-review-model` is stated as **unmeasured** in the run log.
 
+- **Entry-point pass** (client ≥ 0.17.0, your key only for now). When the PR **adds** a route, handler, socket event,
+  server or MCP tool (a deterministic check, `src/surface-delta.mjs`) and the first pass flagged nothing at confidence
+  0.5, a second call asks four questions about each new entry point: authentication, ownership, input bound, rate.
+  Why: in AI-written commits most real flaws are a missing access check or a missing limit on new surface, and the
+  first pass misses half of those. Measured on 150 fresh AI-written commits that add an entry point and got no first-pass
+  flag (pre-registered, blind labels): **17 of 19 real flaws caught, 61 % of its flags real** (95 % CI 42–76 %) at
+  confidence ≥ 0.3, the cut it prints. It costs one more call on about 6 % of PRs. Notices only, never blocking.
+
 ## Excluding paths — `.slopgradeignore`
 
 Tests, fixtures, `vendor/`, `dist/` and example folders are already skipped. For anything else that is not your running
@@ -384,8 +392,9 @@ would rather the control not silently self-disable, `strict: "true"` fails **clo
   `SLOPGRADE_ALLOW_CUSTOM_ORIGIN=1` for a self-hosted server.
 - **With `ai-review` on (opt-in, off by default)**, the PR's changed lines go to Anthropic with **your** key, never to
   slopGrade; or, with no key on a paid slot, to slopGrade, which forwards them to Anthropic and drops them (see *AI review* above).
-- **$0 · local · deterministic** by default. Zero npm dependencies (only `node:*`). Pin the **SHA** to freeze the exact code.
-  The opt-in `ai-review` is the exception: your provider bills the call, and a model's answer can vary between runs.
+- **Local · deterministic** by default. Zero npm dependencies (only `node:*`). Pin the **SHA** to freeze the exact code.
+  The opt-in `ai-review` is the exception: the model call is billed (by your provider, or at token cost on a paid
+  slot), and a model's answer can vary between runs.
 
 ## Free vs hosted
 
