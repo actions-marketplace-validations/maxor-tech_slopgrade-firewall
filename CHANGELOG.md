@@ -6,13 +6,63 @@ All notable changes to the open-source slopGrade Firewall client are documented 
 ## [Unreleased]
 
 ### Added
+- **Dependency scan: « imported by your code » (Go).** OSV Go advisories name the affected packages; when the
+  repository's own Go code (not `vendor/`, `testdata/` or `_test.go`) imports one of them, the version gets the title
+  « imported by your code », says which package, is always annotated and comes right after the KEV ones. It only raises
+  a warning, never hides one: a call through another module is not seen. Measured (PREREG / READ-DEPS-6): of 231 pull
+  requests that added a Go module version with a published advisory, own code imported an affected package in 32
+  (13.9 %).
+
+## [0.18.0] — 2026-11-10
+
+### Added
+- **Dependency scan, on by default.** On a pull request that adds or changes a `package-lock.json` (v1, v2, v3), the
+  package versions the PR adds are checked against OSV from the runner; each one with a published advisory is a
+  warning on the lockfile with its advisory ids. Only `{ecosystem, name, version}` of packages from the public npm
+  registry or its public mirrors (Yarn, npmmirror / taobao, cnpm, Tencent) is sent, to `api.osv.dev`, never to
+  slopGrade; a company registry is never sent. Never blocking; `dependency-scan: "false"` turns it off. Measured on the
+  release run (READ-DEPS-1 as amended): 363 of 1,750 pull requests that changed a `package-lock.json` (20.7 %) added a
+  version whose advisory was already published at PR time; the parser matched an independent parse on 1,220,423 of
+  1,220,423 entries. (A first read, 366, ran with a draft parser that had no registry filter.)
+- **Dependency scan: Go `go.sum` and Ruby `Gemfile.lock`.** Go: module versions that are built (a `/go.mod`-only line
+  is skipped), modules under the repository's own GitHub owner never sent. Ruby: top-level specs from rubygems.org only.
+  Measured (READ-DEPS-2b): 246 of 990 go.sum PRs (24.8 %) and 26 of 729 Gemfile.lock PRs (3.6 %) added a version with an
+  advisory published at PR time; parsers = independent parse on 160,872 of 160,872 entries.
+- **Dependency scan: pnpm, yarn, Python, Rust and PHP lockfiles.** `pnpm-lock.yaml` (v5, v6, v9), `yarn.lock` (v1 and
+  Berry), `poetry.lock`, `uv.lock`, `Pipfile.lock`, `Cargo.lock` and `composer.lock`. Only public-registry packages are
+  kept (pypi.org, crates.io, packagist.org, the npm registry and its public mirrors); pnpm and Berry do not record the
+  registry, so the repository owner's own npm scope is never sent. A pnpm file reformatted with 4-space indentation and
+  an old yarn v1 `name:` header with no range are read. Measured on the release run (READ-DEPS-3): `yarn.lock` 119 of 562
+  PRs (21.2 %), `pnpm-lock.yaml` 103 of 545 (18.9 %), `poetry.lock` 12 of 52, `uv.lock` 22 of 208, `Cargo.lock` 9 of 67,
+  `composer.lock` 20 of 331, `Pipfile.lock` 0 of 8 added a version with an advisory published at PR time; the parsers
+  matched an independent parse (PyYAML, tomllib, json) on 1,317,288 of 1,317,288 entries.
+- **Dependency annotations by severity (`dependency-severity`, default `high`).** Each advisory's GitHub severity is
+  read from its OSV record. Annotated: a KEV version, or a version that is not dev-only and is HIGH / CRITICAL or
+  unrated. LOW, MODERATE and dev-only versions are listed and counted in the run log. Measured (READ-DEPS-5): 571 of 920
+  warned lockfile changes keep an annotation, 2,826 of 6,916 versions, 42 of 42 KEV. `"all"` annotates every version.
+- **Actively exploited first (CISA KEV).** A version whose advisory (or its CVE alias) is on the CISA Known Exploited
+  Vulnerabilities list gets the title « actively exploited (CISA KEV) » and leads the list. A KEV or alias lookup
+  failure keeps every finding and says the priority is missing.
+- **Dependency monitor between pull requests.** On a `schedule`, `push` or `workflow_dispatch` run the scan checks every
+  version the lockfiles pin, so an advisory published after a merge shows up on the next run.
+
+### Changed
+- **AI review: first-pass notices at confidence ≥ 0.5 only.** Every published figure of the first pass is measured at
+  0.5; a lower flag is now listed in the run log and counted, not annotated. The entry-point pass keeps its own
+  measured cut (0.3).
+
+## [0.17.0] — 2026-11-10
+
+### Added
 - **AI review: an entry-point pass.** When a PR adds a network entry point (route, handler, socket event, server, MCP
   tool — `src/surface-delta.mjs`, deterministic) and the first pass flagged nothing at 0.5, a second focused call checks
   authentication, ownership, input bounds and rate on each new entry point, and prints flags at confidence ≥ 0.3 as
   « slopGrade AI review (entry point, triage) » notices. Measured (slopGrade research N3B, pre-registered, 150 fresh
   AI-written commits in exactly that condition, blind labels): 17 of 19 real flaws caught (89.5 %, CI 68.6–97.1),
   60.7 % of flags real (CI 42.4–76.4). The surface detector matches the research detector on all 928 labeled commits
-  of the earlier set. With `ai-review-key` only; the hosted path follows. Never blocking.
+  of the earlier set. With `ai-review-key`, or hosted on a paid slot: a second request with `pass: "focus"` that the
+  server accepts only after this run's first pass flagged nothing at 0.5 and its own surface check finds a new entry
+  point (one per run, same daily cap). Never blocking.
 
 ### Changed
 - **Docs state exactly what leaves the runner, without a « $0 » promise.** The free tier on a private repo still

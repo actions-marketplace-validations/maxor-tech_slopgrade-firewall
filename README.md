@@ -31,7 +31,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with: { fetch-depth: 0 }
-      - uses: maxor-tech/slopgrade-firewall@v0.16.0
+      - uses: maxor-tech/slopgrade-firewall@v0.18.0
 ```
 
 `id-token: write` is required (it is how the repo proves itself). `pull-requests: write` posts the findings on the PR.
@@ -288,8 +288,9 @@ or logic bugs that no taint engine or pattern sees; this is the part of the gate
   Measured with `claude-opus-5-5` at list price ($4 / $20 per million tokens) on 8,165 AI-written public commits:
   median **$0.027** per PR, mean $0.044, 9 in 10 under **$0.11**, the largest $0.38. (On 90 CVE commits, which are
   smaller: median $0.016.)
-- **Notices, never a block.** Each flag is a notice on its file and line, with the class, the model's confidence and
-  one sentence. It never changes the verdict. A missing key, a provider error, a refusal, a timeout (180 s) or a
+- **Notices, never a block.** Each flag at confidence ≥ 0.5 (the cut every figure below is measured at) is a notice on
+  its file and line, with the class, the model's confidence and one sentence; a flag below 0.5 is listed in the run log
+  and counted, not annotated. It never changes the verdict. A missing key, a provider error, a refusal, a timeout (180 s) or a
   malformed answer prints one warning and the run goes on.
 - **The hunk text is data, not instructions.** The prompt says so; a comment in the PR that tells the reviewer to
   approve or to report nothing is not followed (20 of 20 planted comments did not suppress a flag).
@@ -313,13 +314,87 @@ or logic bugs that no taint engine or pattern sees; this is the part of the gate
   Caveats: these are open-source commits, not your code. A flag can still be wrong, and no flag is not a clearance.
   Any other model you set in `ai-review-model` is stated as **unmeasured** in the run log.
 
-- **Entry-point pass** (client ≥ 0.17.0, your key only for now). When the PR **adds** a route, handler, socket event,
+- **Entry-point pass** (client ≥ 0.17.0; with your key, or hosted on a paid slot — the server re-checks the condition). When the PR **adds** a route, handler, socket event,
   server or MCP tool (a deterministic check, `src/surface-delta.mjs`) and the first pass flagged nothing at confidence
   0.5, a second call asks four questions about each new entry point: authentication, ownership, input bound, rate.
   Why: in AI-written commits most real flaws are a missing access check or a missing limit on new surface, and the
   first pass misses half of those. Measured on 150 fresh AI-written commits that add an entry point and got no first-pass
   flag (pre-registered, blind labels): **17 of 19 real flaws caught, 61 % of its flags real** (95 % CI 42–76 %) at
   confidence ≥ 0.3, the cut it prints. It costs one more call on about 6 % of PRs. Notices only, never blocking.
+
+### Dependency scan — on by default (client ≥ 0.18.0)
+
+On a pull request that adds or changes a lockfile, the client lists the package versions the PR **adds** (a bump or a
+new package, never one it removes) and checks them against [OSV](https://osv.dev), the open advisory database behind
+the GitHub, npm, Go, RubyGems, PyPI, crates.io and Packagist advisories. Every version with a published advisory is
+listed in the run log with its advisory ids and GitHub severity. A version whose advisory is on the CISA **Known
+Exploited Vulnerabilities** list (attacked in the wild) gets its own title, « actively exploited (CISA KEV) », and
+comes first. Warnings only, never blocking; an OSV or KEV error prints one warning and the gate goes on.
+`dependency-scan: "false"` turns it off.
+
+**Which versions are annotated** (`dependency-severity`, default `high`): a version on the KEV list, or one that is not
+dev-only and whose advisories are HIGH or CRITICAL, or carry no GitHub severity (an unrated advisory is never hidden).
+A LOW or MODERATE version, or a dev-only one, is counted in the run log, not annotated. On the release run below this
+keeps 571 of the 920 warned lockfile changes (2,826 of 6,916 versions) and all 42 KEV versions.
+`dependency-severity: "all"` annotates every version.
+
+**Imported by your code (Go, client ≥ 0.19.0)**: OSV Go advisories list the affected packages. When your own Go code
+(not `vendor/`, `testdata/` or `_test.go`) imports one of them, the version is titled « imported by your code », names the
+package, is always annotated and comes right after the KEV ones. This only raises a warning: a call that goes through
+another module is not seen, so a version without the label is not « unreachable ». On the release run, own code imported
+an affected package in 32 of 231 pull requests that added a vulnerable Go module version (13.9 %).
+
+**Lockfiles**:
+
+| Ecosystem | Lockfiles | Kept (everything else is never matched or sent) |
+|---|---|---|
+| npm | `package-lock.json` (v1, v2, v3), `pnpm-lock.yaml` (v5, v6, v9), `yarn.lock` (v1 and Berry) | the public npm registry and its public mirrors (Yarn, npmmirror / taobao, cnpm, Tencent); Berry: `npm:` resolutions only |
+| Go | `go.sum` | module versions that are built (a `/go.mod`-only line is graph resolution) |
+| Ruby | `Gemfile.lock` | top-level specs from rubygems.org |
+| Python | `poetry.lock`, `uv.lock`, `Pipfile.lock` | packages from pypi.org |
+| Rust | `Cargo.lock` | crates.io packages |
+| PHP | `composer.lock` | packagist.org packages |
+
+`pnpm-lock.yaml` and a Berry `yarn.lock` do not record the registry, so a package under your repository owner's own npm
+scope (`@<owner>/…`) is never sent: it is most often private.
+
+**Monitor between pull requests**: on a `schedule`, `push` or `workflow_dispatch` run, the client checks **every**
+version the lockfiles pin, so an advisory published after a merge is found on the next run. Add a schedule to the
+workflow:
+
+```yaml
+on:
+  pull_request: {}
+  schedule: [{ cron: "0 6 * * *" }]   # daily dependency monitor on the default branch
+```
+
+- **What is sent**: `{ecosystem, name, version}` of public packages, from your runner to `api.osv.dev` — never to
+  slopGrade, never source. npm packages from a private registry, a git URL or another tarball host, Ruby gems from a
+  source other than rubygems.org, Python packages from another index, a git URL or a local path, crates from a git URL
+  or another registry, composer packages not published on packagist.org, npm packages under your owner's own scope (pnpm,
+  Berry), and Go modules under your repository's own GitHub owner are never sent. The KEV list
+  is downloaded from cisa.gov; advisory records are read from osv.dev by id. Nothing about the repository is sent.
+- **Measured** on slopGrade's release run (61,661 repositories, 52,534 replayed pull requests), counting only
+  advisories **already published when the PR was made**:
+
+  | Lockfile | PRs that changed it | Added a version with a published advisory |
+  |---|---:|---:|
+  | `package-lock.json` | 1,750 | **363 (20.7 %)** |
+  | `go.sum` | 990 | **246 (24.8 %)** |
+  | `yarn.lock` | 562 | **119 (21.2 %)** |
+  | `pnpm-lock.yaml` | 545 | **103 (18.9 %)** |
+  | `composer.lock` | 331 | 20 (6.0 %) |
+  | `uv.lock` | 208 | 22 (10.6 %) |
+  | `Gemfile.lock` | 729 | 26 (3.6 %) |
+  | `Cargo.lock` | 67 | 9 (13.4 %) |
+  | `poetry.lock` | 52 | 12 (23.1 %) |
+  | `Pipfile.lock` | 8 | 0 |
+
+  Of the 920 warned lockfile changes, 578 (63 %) carry a GitHub severity of HIGH or CRITICAL, and 42 (4.6 %) a CISA KEV
+  entry. Where the lockfile records dev packages (`package-lock.json`, pnpm v5 / v6, `Pipfile.lock`, `composer.lock`),
+  about half of the warnings (201 of 383) come only from dev packages. Every parser matched an independent parse (real
+  YAML, TOML and JSON libraries) on every entry: 1,220,423 npm `package-lock.json`, 1,317,288 for the other seven formats,
+  160,872 Go and Ruby. For comparison, the deterministic gate blocked 7 pull requests for a real flaw on that run.
 
 ## Excluding paths — `.slopgradeignore`
 
@@ -390,6 +465,8 @@ would rather the control not silently self-disable, `strict: "true"` fails **clo
 - **No stored secret.** Identity is a short-lived, GitHub-signed OIDC token, audience-bound to the server origin.
 - **Endpoint is fixed.** A custom `SLOPGRADE_ORIGIN` is refused (the run goes dry) unless you explicitly set
   `SLOPGRADE_ALLOW_CUSTOM_ORIGIN=1` for a self-hosted server.
+- **Dependency scan (on by default)**: `{ecosystem, name, version}` of the public packages a PR adds (or, on a scheduled
+  run, every pinned version) go to `api.osv.dev` from your runner — never to slopGrade. `dependency-scan: "false"` turns it off.
 - **With `ai-review` on (opt-in, off by default)**, the PR's changed lines go to Anthropic with **your** key, never to
   slopGrade; or, with no key on a paid slot, to slopGrade, which forwards them to Anthropic and drops them (see *AI review* above).
 - **Local · deterministic** by default. Zero npm dependencies (only `node:*`). Pin the **SHA** to freeze the exact code.

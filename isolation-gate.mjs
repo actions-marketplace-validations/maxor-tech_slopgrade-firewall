@@ -64,11 +64,14 @@ import {
   githubBlobBase, stepSummaryMarkdown, emitStepSummary, uploadSarifToCodeScanning, emitOutputs, refusalLine,
   advisoryOfferOf, offerLogLine,
 } from "./src/client-lib.mjs";
-import { oidcRepoIsPublic, sinkFiles, prChangedPaths, prChangedRanges, selectDeepUnits, requestDeepScan, repoKind, libraryCandidates, candidateOutcomesLine, CANDIDATE_DISMISS_HINT, CANDIDATES_RANKED_NOTE, heisenFeed, splitAgainstFeed, toolingPath, isPaidVerdict, isPublicVerdict, deepScanNudge, unansweredNote, unansweredFiles } from "./src/deep-scan.mjs";
+import { oidcRepoIsPublic, sinkFiles, prChangedPaths, prChangedRanges, selectDeepUnits, requestDeepScan, repoKind, libraryCandidates, candidateOutcomesLine, CANDIDATE_DISMISS_HINT, CANDIDATES_RANKED_NOTE, heisenFeed, splitAgainstFeed, toolingPath, prShas, isPaidVerdict, isPublicVerdict, deepScanNudge, unansweredNote, unansweredFiles } from "./src/deep-scan.mjs";
 import { prHunks, validChangeReview, C_HUNK, C_REVIEW_NOTE, CPP_HUNK, CPP_REVIEW_NOTE, RUST_HUNK, RUST_REVIEW_NOTE, noticeHint, unreviewedNote, REVIEW_BAND_NOTE, reviewBandHeading } from "./src/change-review.mjs";
 import { fixableHitIndex, attachFixes } from "./src/autofix.mjs";
 import { aiReview, aiReviewOutput, prAllHunks, requestHostedReview, AI_REVIEW_DEFAULT_MODEL, AI_REVIEW_TIMEOUT_MS, AI_FOCUS_SYSTEM, wantsFocusedPass, focusedResult } from "./src/ai-review.mjs";
 import { surfaceDelta } from "./src/surface-delta.mjs";
+import { prLockfileChanges, repoLockfiles } from "./src/deps-lock.mjs";
+import { queryOsv, depsOutput, addKev } from "./src/deps-osv.mjs";
+import { markGoImported } from "./src/deps-reach.mjs";
 import { IGNORE_FILE, parseIgnore, ignoreMatcher, readIgnoreText } from "./src/ignore.mjs";
 import { EXCEPTIONS_FILE, parseExceptions, exceptionFor, readExceptionsText } from "./src/exceptions.mjs";
 import { decidePurpose, purposeAdvisoryLine } from "./src/repo-purpose.mjs";
@@ -286,10 +289,33 @@ export async function main(argv = [], env = process.env) {
         const first = await aiReview({ key, model, hunks });
         printAiReview(first, model);
         // Entry-point pass (0.17.0): a PR that adds a route / handler and got no first-pass flag at 0.5 gets a second,
-        // focused call (authentication, ownership, input bound, rate) — the condition it was measured in. Your key only
-        // for now ; the hosted path follows with the server route.
+        // focused call (authentication, ownership, input bound, rate) — the condition it was measured in. The hosted path
+        // runs the same check at step 5c, and the server re-checks it.
         if (wantsFocusedPass(surfaceDelta(hunks), first)) printAiReview(focusedResult(await aiReview({ key, model, hunks, system: AI_FOCUS_SYSTEM })), model);
       } else aiHostedHunks = hunks;
+    }
+  }
+
+  // 0b. Dependency scan (0.18.0, default on) — matched against OSV from the runner (src/deps-osv.mjs), CISA KEV first.
+  //     On a pull request: the versions this PR ADDS to a lockfile. On a schedule / push / manual run: every version the
+  //     lockfiles pin (the monitor: an advisory published after a merge). Public-registry {name, version} only; never blocking.
+  if (argv.includes("--dependency-scan")) {
+    const prs = prShas(env, () => JSON.parse(readFileSync(env.GITHUB_EVENT_PATH, "utf8")));
+    const gitDeps = (args) => execFileSync("git", args, { cwd: root, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 15_000, maxBuffer: 256 * 1024 * 1024 });
+    const readDeps = (p) => readFileSync(join(root, p), "utf8");
+    const ctx = { owner: String(env.GITHUB_REPOSITORY || "").split("/")[0] };
+    const monitor = !prs && ["schedule", "push", "workflow_dispatch"].includes(env.GITHUB_EVENT_NAME);
+    const sets = prs ? prLockfileChanges(gitDeps, readDeps, prs.base, ctx).map((x) => ({ path: x.path, deps: x.introduced }))
+      : monitor ? repoLockfiles(gitDeps, readDeps, ctx) : [];
+    for (const { path, deps } of sets) {
+      if (!deps.length) continue;
+      // Go: does the repository's own code import an affected package? (src/deps-reach.mjs, READ-DEPS-6; a raise, never a hide)
+      const listGo = () => gitDeps(["ls-files", "-z", "--", "*.go"]).split("\0").filter(Boolean);
+      const r = markGoImported(await addKev(await queryOsv(deps)), listGo, readDeps);
+      const out = depsOutput(path, r, { scope: prs ? "pr" : "repo", all: argv.includes("--dependency-scan-all") });
+      for (const n of out.notices) console.log(n);
+      for (const l of out.lines) line(l);
+      if (out.warn) ghWarn(out.lines[0]);
     }
   }
 
@@ -548,7 +574,12 @@ export async function main(argv = [], env = process.env) {
     else if (!paid) printAiReview({ error: "no ai-review-key, and the hosted AI review needs a paid slot — nothing was sent", sent: [], skipped: aiHostedHunks.length, hosted: true }, AI_REVIEW_DEFAULT_MODEL);
     else {
       const post = (url, body) => fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body, signal: AbortSignal.timeout(AI_REVIEW_TIMEOUT_MS + 30_000) });
-      printAiReview(await requestHostedReview(post, origin, oidcToken, sha, aiHostedHunks), AI_REVIEW_DEFAULT_MODEL);
+      const first = await requestHostedReview(post, origin, oidcToken, sha, aiHostedHunks);
+      printAiReview(first, AI_REVIEW_DEFAULT_MODEL);
+      // Entry-point pass, hosted (0.17.0): same condition as with your key; the server re-checks it and the surface.
+      if (wantsFocusedPass(surfaceDelta(aiHostedHunks), first)) {
+        printAiReview(focusedResult(await requestHostedReview(post, origin, oidcToken, sha, aiHostedHunks, "focus")), AI_REVIEW_DEFAULT_MODEL);
+      }
     }
   }
 
